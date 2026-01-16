@@ -38,10 +38,6 @@ Mt = int(compile_data['params']['Mt'])
 Kt = int(compile_data['params']['Kt'])
 Nt = int(compile_data['params']['Nt'])
 
-# Streaming color IDs
-MEMCPYH2D_DATA_1 = int(compile_data['params']['MEMCPYH2D_DATA_1_ID'])
-MEMCPYH2D_DATA_2 = int(compile_data['params']['MEMCPYH2D_DATA_2_ID'])
-
 # Full matrix dimensions
 # A is M x K, B is K x N, C is M x N
 M = Mt * P
@@ -59,6 +55,8 @@ B = np.random.rand(K, N).astype(np.float32)
 
 runner = SdkRuntime(args.name, cmaddr=args.cmaddr)
 
+sym_A = runner.get_id("A")
+sym_B = runner.get_id("B")
 sym_C = runner.get_id("C")
 
 runner.load()
@@ -89,7 +87,7 @@ h = P # number of row PEs in the core rectangle
 #      | | 8 12|  |10 14| |
 #      | | 9 13|, |11 15| |
 # A3 = A2.reshape(2,2,4)
-# A3 = |  0  4  1  5 |
+# A3 = |  0  4  1  5 |    
 #      |  2  6  3  7 |
 #      |  8 12  9 13 |
 #      | 10 14 11 15 |
@@ -98,23 +96,16 @@ h = P # number of row PEs in the core rectangle
 A1 = A.reshape(h, Mt, w, Kt)
 A2 = A1.transpose(0, 2, 3, 1)
 A3 = A2.reshape(h, w, Mt*Kt)
-# Stream A tiles to all PEs with nonblock=True to allow host to continue
-# while data transfers. The device receives data asynchronously.
-runner.memcpy_h2d(MEMCPYH2D_DATA_1, A3.ravel(), 0, 0, w, h, Mt*Kt, \
-    streaming=True, data_type=memcpy_dtype, order=MemcpyOrder.ROW_MAJOR, nonblock=True)
+runner.memcpy_h2d(sym_A, A3.ravel(), 0, 0, w, h, Mt*Kt, \
+    streaming=False, data_type=memcpy_dtype, order=MemcpyOrder.ROW_MAJOR, nonblock=True)
 
 B1 = B.reshape(h, Kt, w, Nt)
 B2 = B1.transpose(0, 2, 3, 1)
 B3 = B2.reshape(h, w, Kt*Nt)
-# Stream B tiles to all PEs with nonblock=True to allow host to continue
-# while data transfers. The device receives data asynchronously.
-runner.memcpy_h2d(MEMCPYH2D_DATA_2, B3.ravel(), 0, 0, w, h, Kt*Nt, \
-    streaming=True, data_type=memcpy_dtype, order=MemcpyOrder.ROW_MAJOR, nonblock=True)
+runner.memcpy_h2d(sym_B, B3.ravel(), 0, 0, w, h, Kt*Nt, \
+    streaming=False, data_type=memcpy_dtype, order=MemcpyOrder.ROW_MAJOR, nonblock=True)
 
-# Launch SUMMA algorithm. With nonblock=True streaming above, data may still
-# be arriving, but the device will have received enough to start computation.
-# The RPC ensures all PEs start SUMMA in a coordinated manner.
-runner.launch("main", nonblock=False)
+runner.launch("main", nonblock=False) # launch main function on each PE
 
 C3_1d_u32 = np.zeros(h*w*Mt*Nt, np.uint32)
 runner.memcpy_d2h(C3_1d_u32, sym_C, 0, 0, w, h, Mt*Nt, \

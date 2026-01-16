@@ -32,25 +32,10 @@ param Kt: i16;
 param Nt: i16;
 
 // Task IDs
-const EXIT:              local_task_id = @get_local_task_id(12);
-const compute_task_id:   local_task_id = @get_local_task_id(13);
-const x_task_id:         local_task_id = @get_local_task_id(14);
-const y_task_id:         local_task_id = @get_local_task_id(15);
-const stream_A_done_id:  local_task_id = @get_local_task_id(16);
-const stream_B_done_id:  local_task_id = @get_local_task_id(17);
-
-// Input queues for streaming A and B tiles
-const h2d_a_iq: input_queue = @get_input_queue(6);
-const h2d_b_iq: input_queue = @get_input_queue(7);
-
-// Task IDs for streaming data
-const memcpy_recv_a_task_id: data_task_id =
-  if      (@is_arch("wse2")) @get_data_task_id(sys_mod.MEMCPYH2D_1)
-  else if (@is_arch("wse3")) @get_data_task_id(h2d_a_iq);
-
-const memcpy_recv_b_task_id: data_task_id =
-  if      (@is_arch("wse2")) @get_data_task_id(sys_mod.MEMCPYH2D_2)
-  else if (@is_arch("wse3")) @get_data_task_id(h2d_b_iq);
+const EXIT:            local_task_id = @get_local_task_id(12);
+const compute_task_id: local_task_id = @get_local_task_id(13);
+const x_task_id:       local_task_id = @get_local_task_id(14);
+const y_task_id:       local_task_id = @get_local_task_id(15);
 
 const mpi_x = @import_module("<collectives_2d/pe>", .{
     .dim_params = c2d_params.x,
@@ -90,12 +75,6 @@ var B_buffer = @zeros([Kt*Nt]f32);
 
 var px: u16;
 var py: u16;
-
-// Counters for streaming A and B tiles
-var num_recv_a: i16 = 0;
-var num_recv_b: i16 = 0;
-var a_ready: bool = false;
-var b_ready: bool = false;
 
 task x_done() void {
   @activate(compute_task_id);
@@ -158,61 +137,14 @@ task f_exit() void {
   sys_mod.unblock_cmd_stream();
 }
 
-// Receive A tile elements from host via streaming
-task memcpy_recv_a(data: f32) void {
-  A_tile[num_recv_a] = data;
-  num_recv_a += 1;
-
-  if (num_recv_a == Mt * Kt) {
-    a_ready = true;
-    @activate(stream_A_done_id);
-  }
-}
-
-// Receive B tile elements from host via streaming
-task memcpy_recv_b(data: f32) void {
-  B_tile[num_recv_b] = data;
-  num_recv_b += 1;
-
-  if (num_recv_b == Kt * Nt) {
-    b_ready = true;
-    @activate(stream_B_done_id);
-  }
-}
-
-// Called when A streaming is complete
-task stream_A_done() void {
-  // A tile fully received, nothing else to do
-  // Note: We still use RPC to launch main() for synchronization
-}
-
-// Called when B streaming is complete
-task stream_B_done() void {
-  // B tile fully received, nothing else to do
-  // Note: We still use RPC to launch main() for synchronization
-}
-
 comptime {
   @bind_local_task(f_exit, EXIT);
   @bind_local_task(compute, compute_task_id);
   @bind_local_task(x_done, x_task_id);
   @bind_local_task(y_done, y_task_id);
-  @bind_local_task(stream_A_done, stream_A_done_id);
-  @bind_local_task(stream_B_done, stream_B_done_id);
-
-  // Bind data tasks for streaming A and B
-  @bind_data_task(memcpy_recv_a, memcpy_recv_a_task_id);
-  @bind_data_task(memcpy_recv_b, memcpy_recv_b_task_id);
-
   @block(compute_task_id);
-
-  // On WSE-3, initialize input queues for streaming
-  if (@is_arch("wse3")) {
-    @initialize_queue(h2d_a_iq, .{ .color = sys_mod.MEMCPYH2D_1 });
-    @initialize_queue(h2d_b_iq, .{ .color = sys_mod.MEMCPYH2D_2 });
-  }
-
   @export_symbol(ptr_C, "C");
+
   @export_symbol(ptr_A, "A");
   @export_symbol(ptr_B, "B");
   @export_symbol(main);

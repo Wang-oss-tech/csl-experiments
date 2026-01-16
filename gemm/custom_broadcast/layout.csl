@@ -17,17 +17,13 @@
 //  ID var              ID var              ID var                ID var
 //   0 c2d_x_color_0     9 c2d_x_entrypt_1  18                    27 reserved (memcpy)
 //   1 c2d_x_color_1    10 c2d_y_entrypt_0  19                    28 reserved (memcpy)
-//   2 MEMCPYH2D_1      11 c2d_y_entrypt_1  20                    29 reserved
-//   3 MEMCPYH2D_2      12 EXIT             21 reserved (memcpy)  30 reserved (memcpy)
+//   2                  11 c2d_y_entrypt_1  20                    29 reserved
+//   3                  12 EXIT             21 reserved (memcpy)  30 reserved (memcpy)
 //   4 c2d_y_color_0    13 compute_task_id  22 reserved (memcpy)  31 reserved
 //   5 c2d_y_color_1    14 x_task_id        23 reserved (memcpy)  32
 //   6                  15 y_task_id        24                    33
-//   7                  16 stream_A_done    25                    34
-//   8 c2d_x_entrypt_0  17 stream_B_done    26                    35
-
-// IDs for memcpy streaming colors
-param MEMCPYH2D_DATA_1_ID: i16; // streams A tiles from host
-param MEMCPYH2D_DATA_2_ID: i16; // streams B tiles from host
+//   7                  16                  25                    34
+//   8 c2d_x_entrypt_0  17                  26                    35
 
 // Program rectangle is P x P
 param P: u16;
@@ -37,14 +33,9 @@ param Mt: u16;
 param Kt: u16;
 param Nt: u16;
 
-const MEMCPYH2D_DATA_1: color = @get_color(MEMCPYH2D_DATA_1_ID);
-const MEMCPYH2D_DATA_2: color = @get_color(MEMCPYH2D_DATA_2_ID);
-
 const memcpy = @import_module("<memcpy/get_params>", .{
   .width = P,
-  .height = P,
-  .MEMCPYH2D_1 = MEMCPYH2D_DATA_1,
-  .MEMCPYH2D_2 = MEMCPYH2D_DATA_2
+  .height = P
 });
 
 const c2d = @import_module("<collectives_2d/params>");

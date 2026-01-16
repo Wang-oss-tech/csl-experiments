@@ -87,7 +87,7 @@ h = P # number of row PEs in the core rectangle
 #      | | 8 12|  |10 14| |
 #      | | 9 13|, |11 15| |
 # A3 = A2.reshape(2,2,4)
-# A3 = |  0  4  1  5 |
+# A3 = |  0  4  1  5 |    
 #      |  2  6  3  7 |
 #      |  8 12  9 13 |
 #      | 10 14 11 15 |
@@ -105,7 +105,7 @@ B3 = B2.reshape(h, w, Kt*Nt)
 runner.memcpy_h2d(sym_B, B3.ravel(), 0, 0, w, h, Kt*Nt, \
     streaming=False, data_type=memcpy_dtype, order=MemcpyOrder.ROW_MAJOR, nonblock=True)
 
-runner.launch("main", nonblock=False)
+runner.launch("main", nonblock=False) # launch main function on each PE
 
 C3_1d_u32 = np.zeros(h*w*Mt*Nt, np.uint32)
 runner.memcpy_d2h(C3_1d_u32, sym_C, 0, 0, w, h, Mt*Nt, \

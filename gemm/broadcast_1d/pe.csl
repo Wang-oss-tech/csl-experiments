@@ -1,0 +1,225 @@
+// 1D Broadcast PE Program
+// At step i, PE i broadcasts its data to all other PEs
+//
+// Key insight: Hardware forwarding via routes means:
+// - Source PE sends on color, wavelet goes to RAMP (self) AND neighbors
+// - Neighbor receives, wavelet goes to RAMP (self) AND next neighbor
+// - All PEs receive via RAMP, so all need to set up receive operations
+
+param memcpy_params: comptime_struct;
+param P: u16;
+param N: u16;
+param east_color: color;
+param west_color: color;
+param recv_east_task_id: local_task_id;
+param recv_west_task_id: local_task_id;
+
+const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
+const layout_mod = @import_module("<layout>");
+
+// Task IDs
+const main_task_id: local_task_id = @get_local_task_id(10);
+const EXIT: local_task_id = @get_local_task_id(11);
+
+// Queues
+const east_oq: output_queue = @get_output_queue(2);
+const west_oq: output_queue = @get_output_queue(3);
+const east_iq: input_queue = @get_input_queue(2);
+const west_iq: input_queue = @get_input_queue(3);
+
+
+// Each PE's home data (initialized by host)
+var data: [N]f32;
+var ptr_data: [*]f32 = &data;
+
+// Buffer for received broadcast data
+var result: [N]f32;
+const ptr_result: [*]f32 = &result;
+
+// State tracking
+var step: u16 = 0;
+var px: u16 = 0;
+
+fn get_px() u16 {
+  return @as(u16, layout_mod.get_x_coord());
+}
+
+// Synchronization: track when both directions complete
+var east_done: bool = false;
+var west_done: bool = false;
+
+fn check_step_complete() void {
+  // Need to receive from appropriate direction(s)
+  // Source PE receives its own broadcast (from one or both directions)
+  // Left-of-source PEs receive from east (west_color)
+  // Right-of-source PEs receive from west (east_color)
+
+  var needed_east: bool = (px >= step);  // receive from west via east_color
+  var needed_west: bool = (px <= step);  // receive from east via west_color
+
+  // Edge cases: leftmost doesn't receive from west, rightmost doesn't receive from east
+  if (px == 0) {
+    needed_west = false;
+    west_done = true;
+  }
+  if (px == P - 1) {
+    needed_east = false;
+    east_done = true;
+  }
+
+  // Source PE only needs one direction (or both if in middle)
+  // Actually, source PE receives its own send on both colors it uses
+
+  if ((needed_east and east_done) or !needed_east) {
+    if ((needed_west and west_done) or !needed_west) {
+      // Step complete, move to next
+      step += 1;
+      east_done = false;
+      west_done = false;
+
+      if (step < P) {
+        @activate(main_task_id);
+      } else {
+        @activate(EXIT);
+      }
+    }
+  }
+}
+
+// Callback when eastward receive completes
+task recv_east_complete() void {
+  east_done = true;
+  check_step_complete();
+}
+
+// Callback when westward receive completes
+task recv_west_complete() void {
+  west_done = true;
+  check_step_complete();
+}
+
+// Set up receive for data coming from the west (via east_color)
+fn setup_recv_east() void {
+  const in_dsd = @get_dsd(fabin_dsd, .{
+    .fabric_color = east_color,
+    .extent = N,
+    .input_queue = east_iq,
+  });
+  const out_dsd = @get_dsd(mem1d_dsd, .{
+    .base_address = &result,
+    .extent = N,
+  });
+  @mov32(out_dsd, in_dsd, .{ .async = true, .activate = recv_east_task_id });
+}
+
+// Set up receive for data coming from the east (via west_color)
+fn setup_recv_west() void {
+  const in_dsd = @get_dsd(fabin_dsd, .{
+    .fabric_color = west_color,
+    .extent = N,
+    .input_queue = west_iq,
+  });
+  const out_dsd = @get_dsd(mem1d_dsd, .{
+    .base_address = &result,
+    .extent = N,
+  });
+  @mov32(out_dsd, in_dsd, .{ .async = true, .activate = recv_west_task_id });
+}
+
+// Send data eastward (to PEs on the right) - blocking
+fn send_east() void {
+  const in_dsd = @get_dsd(mem1d_dsd, .{
+    .base_address = &data,
+    .extent = N,
+  });
+  const out_dsd = @get_dsd(fabout_dsd, .{
+    .fabric_color = east_color,
+    .extent = N,
+    .output_queue = east_oq,
+  });
+  @mov32(out_dsd, in_dsd);
+}
+
+// Send data westward (to PEs on the left) - blocking
+fn send_west() void {
+  const in_dsd = @get_dsd(mem1d_dsd, .{
+    .base_address = &data,
+    .extent = N,
+  });
+  const out_dsd = @get_dsd(fabout_dsd, .{
+    .fabric_color = west_color,
+    .extent = N,
+    .output_queue = west_oq,
+  });
+  @mov32(out_dsd, in_dsd);
+}
+
+// Main task: execute one broadcast step
+task main_task() void {
+  // First, set up receives for this step
+  // All PEs (except edges) need to receive
+
+  if (px == step) {
+    // I'm the source - receive my own broadcast
+    if (px < P - 1) {
+      // Send east and receive via east_color (self-loop through fabric)
+      setup_recv_east();
+      send_east();
+    } else {
+      east_done = true;
+    }
+
+    if (px > 0) {
+      // Send west and receive via west_color (self-loop through fabric)
+      setup_recv_west();
+      send_west();
+    } else {
+      west_done = true;
+    }
+
+    // If we're at an edge and only sent one direction, check completion
+    check_step_complete();
+
+  } else if (px < step) {
+    // I'm left of source - receive from east via west_color
+    // Don't need east_color receive
+    east_done = true;
+    setup_recv_west();
+
+  } else {
+    // I'm right of source - receive from west via east_color
+    // Don't need west_color receive
+    west_done = true;
+    setup_recv_east();
+  }
+}
+
+fn main() void {
+  px = get_px();
+  step = 0;
+  east_done = false;
+  west_done = false;
+  @activate(main_task_id);
+}
+
+task f_exit() void {
+  sys_mod.unblock_cmd_stream();
+}
+
+comptime {
+  @bind_local_task(main_task, main_task_id);
+  @bind_local_task(recv_east_complete, recv_east_task_id);
+  @bind_local_task(recv_west_complete, recv_west_task_id);
+  @bind_local_task(f_exit, EXIT);
+
+  if (@is_arch("wse3")) {
+    @initialize_queue(east_oq, .{ .color = east_color });
+    @initialize_queue(west_oq, .{ .color = west_color });
+    @initialize_queue(east_iq, .{ .color = east_color });
+    @initialize_queue(west_iq, .{ .color = west_color });
+  }
+
+  @export_symbol(ptr_data, "data");
+  @export_symbol(ptr_result, "result");
+  @export_symbol(main);
+}

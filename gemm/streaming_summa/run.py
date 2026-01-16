@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Streaming SUMMA run script
+# Same as custom_broadcast - loads A, B via memcpy, runs main(), reads C
 
 import argparse
 import json
@@ -87,7 +89,7 @@ h = P # number of row PEs in the core rectangle
 #      | | 8 12|  |10 14| |
 #      | | 9 13|, |11 15| |
 # A3 = A2.reshape(2,2,4)
-# A3 = |  0  4  1  5 |    
+# A3 = |  0  4  1  5 |
 #      |  2  6  3  7 |
 #      |  8 12  9 13 |
 #      | 10 14 11 15 |

@@ -1,0 +1,125 @@
+// Copyright 2025 Cerebras Systems.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Streaming SUMMA with custom bidirectional broadcast
+// Uses 4 colors for streaming: A_east, A_west, B_south, B_north
+
+// Color/Task ID map:
+//  ID var              ID var              ID var
+//   0 (reserved)        8                  16
+//   1 (reserved)        9                  17
+//   2 A_east_color     10 compute_task_id  18
+//   3 A_west_color     11 EXIT             19
+//   4 B_south_color    12                  20
+//   5 B_north_color    13                  21 reserved (memcpy)
+//   6                  14                  22 reserved (memcpy)
+//   7                  15                  23 reserved (memcpy)
+
+// Program rectangle is P x P
+param P: u16;
+
+// Matrix dimensions on one PE
+param Mt: u16;
+param Kt: u16;
+param Nt: u16;
+
+// Colors for streaming
+const A_east_color:  color = @get_color(2);  // A flows WEST -> EAST
+const A_west_color:  color = @get_color(3);  // A flows EAST -> WEST
+const B_south_color: color = @get_color(4);  // B flows NORTH -> SOUTH
+const B_north_color: color = @get_color(5);  // B flows SOUTH -> NORTH
+
+const memcpy = @import_module("<memcpy/get_params>", .{
+  .width = P,
+  .height = P
+});
+
+layout {
+  @set_rectangle(P, P);
+
+  // Route configurations
+  // Include RAMP in rx to allow source PEs to inject locally
+  // For A_east: data flows WEST -> EAST (columns > source receive from WEST, source injects from RAMP)
+  const RX_WR_TX_RE = .{ .rx = .{WEST, RAMP}, .tx = .{RAMP, EAST} };  // receive from WEST or RAMP, send to RAMP and EAST
+  const RX_WR_TX_R  = .{ .rx = .{WEST, RAMP}, .tx = .{RAMP} };        // rightmost column: no EAST
+
+  // For A_west: data flows EAST -> WEST (columns < source receive from EAST, source injects from RAMP)
+  const RX_ER_TX_RW = .{ .rx = .{EAST, RAMP}, .tx = .{RAMP, WEST} };  // receive from EAST or RAMP, send to RAMP and WEST
+  const RX_ER_TX_R  = .{ .rx = .{EAST, RAMP}, .tx = .{RAMP} };        // leftmost column: no WEST
+
+  // For B_south: data flows NORTH -> SOUTH (rows > source receive from NORTH, source injects from RAMP)
+  const RX_NR_TX_RS = .{ .rx = .{NORTH, RAMP}, .tx = .{RAMP, SOUTH} };  // receive from NORTH or RAMP, send to RAMP and SOUTH
+  const RX_NR_TX_R  = .{ .rx = .{NORTH, RAMP}, .tx = .{RAMP} };         // bottommost row: no SOUTH
+
+  // For B_north: data flows SOUTH -> NORTH (rows < source receive from SOUTH, source injects from RAMP)
+  const RX_SR_TX_RN = .{ .rx = .{SOUTH, RAMP}, .tx = .{RAMP, NORTH} };  // receive from SOUTH or RAMP, send to RAMP and NORTH
+  const RX_SR_TX_R  = .{ .rx = .{SOUTH, RAMP}, .tx = .{RAMP} };         // topmost row: no NORTH
+
+  for (@range(u16, P)) |pe_x| {
+    const memcpy_params = memcpy.get_params(pe_x);
+
+    for (@range(u16, P)) |pe_y| {
+      @set_tile_code(pe_x, pe_y, "pe.csl", .{
+        .memcpy_params = memcpy_params,
+        .Mt = Mt, .Kt = Kt, .Nt = Nt,
+        .A_east_color = A_east_color,
+        .A_west_color = A_west_color,
+        .B_south_color = B_south_color,
+        .B_north_color = B_north_color,
+      });
+
+      // Configure A_east routing (WEST -> EAST, with RAMP for source injection)
+      if (pe_x == P - 1) {
+        // Rightmost column: receive from WEST/RAMP, send to RAMP only
+        @set_color_config(pe_x, pe_y, A_east_color, .{ .routes = RX_WR_TX_R });
+      } else {
+        // All other columns: receive from WEST/RAMP, send to RAMP and EAST
+        @set_color_config(pe_x, pe_y, A_east_color, .{ .routes = RX_WR_TX_RE });
+      }
+
+      // Configure A_west routing (EAST -> WEST, with RAMP for source injection)
+      if (pe_x == 0) {
+        // Leftmost column: receive from EAST/RAMP, send to RAMP only
+        @set_color_config(pe_x, pe_y, A_west_color, .{ .routes = RX_ER_TX_R });
+      } else {
+        // All other columns: receive from EAST/RAMP, send to RAMP and WEST
+        @set_color_config(pe_x, pe_y, A_west_color, .{ .routes = RX_ER_TX_RW });
+      }
+
+      // Configure B_south routing (NORTH -> SOUTH, with RAMP for source injection)
+      if (pe_y == P - 1) {
+        // Bottommost row: receive from NORTH/RAMP, send to RAMP only
+        @set_color_config(pe_x, pe_y, B_south_color, .{ .routes = RX_NR_TX_R });
+      } else {
+        // All other rows: receive from NORTH/RAMP, send to RAMP and SOUTH
+        @set_color_config(pe_x, pe_y, B_south_color, .{ .routes = RX_NR_TX_RS });
+      }
+
+      // Configure B_north routing (SOUTH -> NORTH, with RAMP for source injection)
+      if (pe_y == 0) {
+        // Topmost row: receive from SOUTH/RAMP, send to RAMP only
+        @set_color_config(pe_x, pe_y, B_north_color, .{ .routes = RX_SR_TX_R });
+      } else {
+        // All other rows: receive from SOUTH/RAMP, send to RAMP and NORTH
+        @set_color_config(pe_x, pe_y, B_north_color, .{ .routes = RX_SR_TX_RN });
+      }
+    }
+  }
+
+  // Export symbol names
+  @export_name("A", [*]f32, true);
+  @export_name("B", [*]f32, true);
+  @export_name("C", [*]f32, true);
+  @export_name("main", fn()void);
+}

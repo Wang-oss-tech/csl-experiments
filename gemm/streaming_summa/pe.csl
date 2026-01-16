@@ -1,0 +1,388 @@
+// Copyright 2025 Cerebras Systems.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Streaming SUMMA PE program with custom bidirectional broadcast
+// Uses wavelet-triggered tasks (WTTs) for receiving streamed data
+// Double buffering enables overlap between communication and computation
+
+param memcpy_params: comptime_struct;
+
+// Matrix tile dimensions
+param Mt: u16;
+param Kt: u16;
+param Nt: u16;
+
+// Streaming colors from layout
+param A_east_color: color;
+param A_west_color: color;
+param B_south_color: color;
+param B_north_color: color;
+
+// Number of PEs in each dimension (P x P grid)
+// TODO: This should be a param from layout
+const P: u16 = 2;
+
+// Memcpy module for host communication
+const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
+
+// Layout module for PE coordinates
+const layout_mod = @import_module("<layout>");
+
+// Task IDs
+const compute_task_id: local_task_id = @get_local_task_id(10);
+const EXIT: local_task_id = @get_local_task_id(11);
+
+// Input queues for receiving streaming data
+const A_east_iq: input_queue = @get_input_queue(2);
+const A_west_iq: input_queue = @get_input_queue(3);
+const B_south_iq: input_queue = @get_input_queue(4);
+const B_north_iq: input_queue = @get_input_queue(5);
+
+// Output queues for sending streaming data
+const A_east_oq: output_queue = @get_output_queue(2);
+const A_west_oq: output_queue = @get_output_queue(3);
+const B_south_oq: output_queue = @get_output_queue(4);
+const B_north_oq: output_queue = @get_output_queue(5);
+
+// Data task IDs bound to input queues
+const recv_A_east_task_id: data_task_id =
+  if (@is_arch("wse2")) @get_data_task_id(A_east_color)
+  else @get_data_task_id(A_east_iq);
+
+const recv_A_west_task_id: data_task_id =
+  if (@is_arch("wse2")) @get_data_task_id(A_west_color)
+  else @get_data_task_id(A_west_iq);
+
+const recv_B_south_task_id: data_task_id =
+  if (@is_arch("wse2")) @get_data_task_id(B_south_color)
+  else @get_data_task_id(B_south_iq);
+
+const recv_B_north_task_id: data_task_id =
+  if (@is_arch("wse2")) @get_data_task_id(B_north_color)
+  else @get_data_task_id(B_north_iq);
+
+// Local tiles (loaded from host via memcpy)
+var A_tile: [Mt * Kt]f32;
+var B_tile: [Kt * Nt]f32;
+var C_tile: [Mt * Nt]f32 = @zeros([Mt * Nt]f32);
+
+// Double buffers for receiving streamed data
+var A_buffer_0: [Mt * Kt]f32 = @zeros([Mt * Kt]f32);
+var A_buffer_1: [Mt * Kt]f32 = @zeros([Mt * Kt]f32);
+var B_buffer_0: [Kt * Nt]f32 = @zeros([Kt * Nt]f32);
+var B_buffer_1: [Kt * Nt]f32 = @zeros([Kt * Nt]f32);
+
+// Pointers for export (var because layout declares them writable)
+var A_ptr: [*]f32 = &A_tile;
+var B_ptr: [*]f32 = &B_tile;
+var C_ptr: [*]f32 = &C_tile;
+
+// PE coordinates
+var px: i16 = 0;
+var py: i16 = 0;
+
+// Step tracking
+var step: u16 = 0;           // Current step for receiving data
+var compute_step: u16 = 0;   // Current step for computation
+
+// Receive counters (per buffer: index 0 for even steps, index 1 for odd steps)
+var recv_A_count_0: i32 = 0;
+var recv_A_count_1: i32 = 0;
+var recv_B_count_0: i32 = 0;
+var recv_B_count_1: i32 = 0;
+
+// Completion flags
+var A_ready_0: bool = false;
+var A_ready_1: bool = false;
+var B_ready_0: bool = false;
+var B_ready_1: bool = false;
+
+// Helper functions to get buffer pointers
+fn get_A_buffer(s: u16) *[Mt * Kt]f32 {
+  return if (s % 2 == 0) &A_buffer_0 else &A_buffer_1;
+}
+
+fn get_B_buffer(s: u16) *[Kt * Nt]f32 {
+  return if (s % 2 == 0) &B_buffer_0 else &B_buffer_1;
+}
+
+// Helper functions to get/set counters and flags
+fn get_recv_A_count(s: u16) i32 {
+  return if (s % 2 == 0) recv_A_count_0 else recv_A_count_1;
+}
+
+fn set_recv_A_count(s: u16, val: i32) void {
+  if (s % 2 == 0) { recv_A_count_0 = val; } else { recv_A_count_1 = val; }
+}
+
+fn get_recv_B_count(s: u16) i32 {
+  return if (s % 2 == 0) recv_B_count_0 else recv_B_count_1;
+}
+
+fn set_recv_B_count(s: u16, val: i32) void {
+  if (s % 2 == 0) { recv_B_count_0 = val; } else { recv_B_count_1 = val; }
+}
+
+fn get_A_ready(s: u16) bool {
+  return if (s % 2 == 0) A_ready_0 else A_ready_1;
+}
+
+fn set_A_ready(s: u16, val: bool) void {
+  if (s % 2 == 0) { A_ready_0 = val; } else { A_ready_1 = val; }
+}
+
+fn get_B_ready(s: u16) bool {
+  return if (s % 2 == 0) B_ready_0 else B_ready_1;
+}
+
+fn set_B_ready(s: u16, val: bool) void {
+  if (s % 2 == 0) { B_ready_0 = val; } else { B_ready_1 = val; }
+}
+
+// Check if ready to compute for step s
+fn check_compute_ready(s: u16) void {
+  if (get_A_ready(s) and get_B_ready(s)) {
+    if (s == compute_step) {
+      @activate(compute_task_id);
+    }
+    // else: data ready but previous compute not done yet
+    // compute will be triggered after previous step completes
+  }
+}
+
+// Handle received A value (common logic for both directions)
+fn handle_recv_A(a_val: f32) void {
+  const s = step;
+  // Skip if this PE is the source for A at this step
+  if (px == @as(i16, s)) {
+    return;
+  }
+
+  const buf = get_A_buffer(s);
+  const count = get_recv_A_count(s);
+  buf.*[@as(u16, count)] = a_val;
+  set_recv_A_count(s, count + 1);
+
+  if (count + 1 == @as(i32, Mt * Kt)) {
+    set_A_ready(s, true);
+    check_compute_ready(s);
+  }
+}
+
+// Handle received B value (common logic for both directions)
+fn handle_recv_B(b_val: f32) void {
+  const s = step;
+  // Skip if this PE is the source for B at this step
+  if (py == @as(i16, s)) {
+    return;
+  }
+
+  const buf = get_B_buffer(s);
+  const count = get_recv_B_count(s);
+  buf.*[@as(u16, count)] = b_val;
+  set_recv_B_count(s, count + 1);
+
+  if (count + 1 == @as(i32, Kt * Nt)) {
+    set_B_ready(s, true);
+    check_compute_ready(s);
+  }
+}
+
+// Wavelet-Triggered Tasks (WTTs) for receiving streamed data
+task recv_A_east(a_val: f32) void {
+  handle_recv_A(a_val);
+}
+
+task recv_A_west(a_val: f32) void {
+  handle_recv_A(a_val);
+}
+
+task recv_B_south(b_val: f32) void {
+  handle_recv_B(b_val);
+}
+
+task recv_B_north(b_val: f32) void {
+  handle_recv_B(b_val);
+}
+
+// Inject A tile to both directions (called by source PE)
+fn inject_A(s: u16) void {
+  if (px != @as(i16, s)) {
+    return;  // Not the source for this step
+  }
+
+  const A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt * Kt} -> A_tile[i] });
+
+  // Inject to EAST direction (for columns > s)
+  if (s < P - 1) {
+    const east_dsd = @get_dsd(fabout_dsd, .{
+      .fabric_color = A_east_color,
+      .extent = Mt * Kt,
+      .output_queue = A_east_oq
+    });
+    @fmovs(east_dsd, A_dsd);
+  }
+
+  // Inject to WEST direction (for columns < s)
+  if (s > 0) {
+    const west_dsd = @get_dsd(fabout_dsd, .{
+      .fabric_color = A_west_color,
+      .extent = Mt * Kt,
+      .output_queue = A_west_oq
+    });
+    @fmovs(west_dsd, A_dsd);
+  }
+
+  // Source PE has A data ready immediately
+  set_A_ready(s, true);
+}
+
+// Inject B tile to both directions (called by source PE)
+fn inject_B(s: u16) void {
+  if (py != @as(i16, s)) {
+    return;  // Not the source for this step
+  }
+
+  const B_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Kt * Nt} -> B_tile[i] });
+
+  // Inject to SOUTH direction (for rows > s)
+  if (s < P - 1) {
+    const south_dsd = @get_dsd(fabout_dsd, .{
+      .fabric_color = B_south_color,
+      .extent = Kt * Nt,
+      .output_queue = B_south_oq
+    });
+    @fmovs(south_dsd, B_dsd);
+  }
+
+  // Inject to NORTH direction (for rows < s)
+  if (s > 0) {
+    const north_dsd = @get_dsd(fabout_dsd, .{
+      .fabric_color = B_north_color,
+      .extent = Kt * Nt,
+      .output_queue = B_north_oq
+    });
+    @fmovs(north_dsd, B_dsd);
+  }
+
+  // Source PE has B data ready immediately
+  set_B_ready(s, true);
+}
+
+// Compute task: performs GEMM for current step
+task compute() void {
+  const s = compute_step;
+
+  // Get pointers to A and B data for this step
+  const Ap: *[Mt * Kt]f32 = if (px == @as(i16, s)) &A_tile else get_A_buffer(s);
+  const Bp: *[Kt * Nt]f32 = if (py == @as(i16, s)) &B_tile else get_B_buffer(s);
+
+  // START NEXT STREAM FIRST (non-blocking, enables overlap)
+  if (s + 1 < P) {
+    step = s + 1;  // Advance receive step
+    inject_A(s + 1);
+    inject_B(s + 1);
+  }
+
+  // GEMM: C += A * B
+  // C is Mt x Nt, A is Mt x Kt, B is Kt x Nt
+  // Create DSD and set base address to pointer
+  var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
+  A_dsd = @set_dsd_base_addr(A_dsd, Ap);
+
+  for (@range(i16, Kt)) |k| {
+    var C_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C_tile[i] });
+
+    for (@range(i16, Nt)) |j| {
+      const b = Bp.*[@as(u16, j) * Kt + @as(u16, k)];
+      @fmacs(C_dsd, C_dsd, A_dsd, b);
+      C_dsd = @increment_dsd_offset(C_dsd, Mt, f32);
+    }
+    A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
+  }
+
+  // Reset counters and flags for the buffer we just used
+  set_recv_A_count(s, 0);
+  set_recv_B_count(s, 0);
+  set_A_ready(s, false);
+  set_B_ready(s, false);
+
+  // Advance compute step
+  compute_step = s + 1;
+
+  // DEBUG: Exit after step 0 to test basic mechanism
+  @activate(EXIT);
+  // // Check if done or if next step data is ready
+  // if (compute_step == P) {
+  //   @activate(EXIT);
+  // } else {
+  //   // Check if next step's data is already ready
+  //   check_compute_ready(compute_step);
+  // }
+}
+
+// Exit task: signal completion to host
+task f_exit() void {
+  sys_mod.unblock_cmd_stream();
+}
+
+// Main function: called by host to start computation
+fn main() void {
+  // Get PE coordinates from layout
+  px = @as(i16, layout_mod.get_x_coord());
+  py = @as(i16, layout_mod.get_y_coord());
+
+  // Initialize state
+  step = 0;
+  compute_step = 0;
+
+  // Start streaming for step 0
+  inject_A(0);
+  inject_B(0);
+
+  // For source PEs (diagonal at step 0), both A and B are ready
+  // check_compute_ready is called inside inject functions
+  check_compute_ready(0);
+}
+
+comptime {
+  // Bind WTTs to their task IDs
+  @bind_data_task(recv_A_east, recv_A_east_task_id);
+  @bind_data_task(recv_A_west, recv_A_west_task_id);
+  @bind_data_task(recv_B_south, recv_B_south_task_id);
+  @bind_data_task(recv_B_north, recv_B_north_task_id);
+
+  // Bind local tasks
+  @bind_local_task(compute, compute_task_id);
+  @bind_local_task(f_exit, EXIT);
+
+  // Export symbols
+  @export_symbol(A_ptr, "A");
+  @export_symbol(B_ptr, "B");
+  @export_symbol(C_ptr, "C");
+  @export_symbol(main);
+
+  // Initialize queues for WSE-3
+  if (@is_arch("wse3")) {
+    @initialize_queue(A_east_iq, .{ .color = A_east_color });
+    @initialize_queue(A_west_iq, .{ .color = A_west_color });
+    @initialize_queue(B_south_iq, .{ .color = B_south_color });
+    @initialize_queue(B_north_iq, .{ .color = B_north_color });
+
+    @initialize_queue(A_east_oq, .{ .color = A_east_color });
+    @initialize_queue(A_west_oq, .{ .color = A_west_color });
+    @initialize_queue(B_south_oq, .{ .color = B_south_color });
+    @initialize_queue(B_north_oq, .{ .color = B_north_color });
+  }
+}

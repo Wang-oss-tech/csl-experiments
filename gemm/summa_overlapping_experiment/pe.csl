@@ -69,85 +69,67 @@ var ptr_A : [*]f32 = &A_tile;
 var ptr_B : [*]f32 = &B_tile;
 var ptr_C : [*]f32 = &C_tile;
 
-// Double buffers for pipelining
-// Allows broadcasts to be 1 step ahead of compute
+// Double buffers for overlapping communication and computation
+// Buffer 0 is used for even steps, buffer 1 for odd steps
 var A_buffer_0 = @zeros([Mt*Kt]f32);
 var A_buffer_1 = @zeros([Mt*Kt]f32);
 var B_buffer_0 = @zeros([Kt*Nt]f32);
 var B_buffer_1 = @zeros([Kt*Nt]f32);
 
-// Track which compute step we're on
-var compute_step: u16 = 0;
+// Helper functions to get the correct buffer based on step
+fn get_A_buffer(s: u16) *[Mt*Kt]f32 {
+    return if (s % 2 == 0) &A_buffer_0 else &A_buffer_1;
+}
 
-// Track which broadcast to launch next
-var next_broadcast_step: u16 = 1;  // Start at 1 (step 0 launched by main)
+fn get_B_buffer(s: u16) *[Kt*Nt]f32 {
+    return if (s % 2 == 0) &B_buffer_0 else &B_buffer_1;
+}
 
 var px: u16;
 var py: u16;
 
 task x_done() void {
-  @activate(compute_task_id);  // Wake compute for completed broadcast
-
-  // *** Immediately initiate next X-direction broadcast ***
-  // But only if we're not too far ahead of compute (at most 1 step ahead)
-  if (next_broadcast_step < P and next_broadcast_step < compute_step + 2) {
-    const step = next_broadcast_step;
-    const buf_idx = step % 2;
-    const Ap = if (px == step) &A_tile
-               else if (buf_idx == 0) &A_buffer_0
-               else &A_buffer_1;
-
-    mpi_x.broadcast(step, @ptrcast([*]u32, Ap), Mt * Kt, x_task_id);
-    // Don't increment here - y_done needs the same step!
-  }
+  @activate(compute_task_id);
 }
 
 task y_done() void {
-  @unblock(compute_task_id);   // Allow compute to run
-
-  // *** Immediately initiate next Y-direction broadcast ***
-  // But only if we're not too far ahead of compute (at most 1 step ahead)
-  if (next_broadcast_step < P and next_broadcast_step < compute_step + 2) {
-    const step = next_broadcast_step;
-    const buf_idx = step % 2;
-    const Bp = if (py == step) &B_tile
-               else if (buf_idx == 0) &B_buffer_0
-               else &B_buffer_1;
-
-    mpi_y.broadcast(step, @ptrcast([*]u32, Bp), Kt * Nt, y_task_id);
-    // Increment AFTER both x and y broadcasts are launched
-    next_broadcast_step += 1;
-  }
+  @unblock(compute_task_id);
 }
 
+var step: u16 = 0;
+
+// main() is called once by the host to start the algorithm
+// It initializes state and starts the first broadcast (step 0)
 fn main() void {
-  // Initialize MPI and initiate first broadcast directly
+  // Initialize MPI state
   mpi_x.init();
   mpi_y.init();
   px = mpi_x.pe_id;
   py = mpi_y.pe_id;
 
-  // Directly initiate broadcast for step 0
-  const Ap = if (px == 0) &A_tile else &A_buffer_0;
-  const Bp = if (py == 0) &B_tile else &B_buffer_0;
-
+  // Start broadcast for step 0
+  // Use buffer[0] for step 0
+  const Ap = if (px == 0) &A_tile else get_A_buffer(0);
+  const Bp = if (py == 0) &B_tile else get_B_buffer(0);
   mpi_x.broadcast(0, @ptrcast([*]u32, Ap), Mt * Kt, x_task_id);
   mpi_y.broadcast(0, @ptrcast([*]u32, Bp), Kt * Nt, y_task_id);
 }
 
 task compute() void {
-  // Select buffer based on compute_step (matches the broadcast that filled it)
-  const buf_idx = compute_step % 2;
-  const Ap = if (px == compute_step) &A_tile
-             else if (buf_idx == 0) &A_buffer_0
-             else &A_buffer_1;
-  const Bp = if (py == compute_step) &B_tile
-             else if (buf_idx == 0) &B_buffer_0
-             else &B_buffer_1;
+  const Ap = if (px == step) &A_tile else get_A_buffer(step);
+  const Bp = if (py == step) &B_tile else get_B_buffer(step);
 
-  // Perform local GEMM for CURRENT step
-  // Next broadcast is launched by x_done/y_done when previous broadcast completes
-  var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
+
+  if (step + 1 < P) {
+    const next_step: u16 = step + 1;
+    const next_Ap = if (px == next_step) &A_tile else get_A_buffer(next_step);
+    const next_Bp = if (py == next_step) &B_tile else get_B_buffer(next_step);
+    mpi_x.broadcast(next_step, @ptrcast([*]u32, next_Ap), Mt * Kt, x_task_id);
+    mpi_y.broadcast(next_step, @ptrcast([*]u32, next_Bp), Kt * Nt, y_task_id);
+  }
+
+  // GEMM
+  var A_dsd  = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
   A_dsd = @set_dsd_base_addr(A_dsd, Ap);
 
   for (@range(i16, Kt)) |k| {
@@ -161,10 +143,11 @@ task compute() void {
     A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
   }
 
-  compute_step += 1;
+  step += 1;
   @block(compute_task_id);
 
-  if (compute_step == P) {
+  // Next compute will be triggered by x_done/y_done from broadcast
+  if (step == P) {
     @activate(EXIT);
   }
 }
@@ -179,11 +162,9 @@ comptime {
   @bind_local_task(compute, compute_task_id);
   @bind_local_task(x_done, x_task_id);
   @bind_local_task(y_done, y_task_id);
-
-  // Compute task starts blocked
   @block(compute_task_id);
-
   @export_symbol(ptr_C, "C");
+
   @export_symbol(ptr_A, "A");
   @export_symbol(ptr_B, "B");
   @export_symbol(main);
