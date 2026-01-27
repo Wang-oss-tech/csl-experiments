@@ -228,7 +228,7 @@ fn start_broadcast_0() void {
 
 fn do_gemm(k: u16) void {
     // prt.print_string("Starting GEMMn");
-    prt.print_string("New Starting GEMM ");
+    prt.print_string("Starting GEMM ");
     prt.print_u16_decimal(k);
     prt.print_string(" location ");
     prt.print_u16_decimal(px);
