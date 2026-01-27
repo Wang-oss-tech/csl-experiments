@@ -1,0 +1,95 @@
+// Layout for 4-color alternating pipeline
+// Uses 2 pairs of colors: (a_color_0, b_color_0) and (a_color_1, b_color_1)
+// Alternates between pairs to avoid reconfiguration overhead
+
+param P: u16;
+param Mt: i16;
+param Kt: i16;
+param Nt: i16;
+
+// 4 colors for alternating broadcast pairs
+const a_color_0 = @get_color(8);   // Row broadcast, even steps
+const b_color_0 = @get_color(9);   // Col broadcast, even steps
+const a_color_1 = @get_color(10);  // Row broadcast, odd steps
+const b_color_1 = @get_color(11);  // Col broadcast, odd steps
+
+// Task IDs
+const EXIT_TASK_ID = @get_local_task_id(9);
+const A0_DONE_ID = @get_local_task_id(10);
+const B0_DONE_ID = @get_local_task_id(11);
+const A1_DONE_ID = @get_local_task_id(12);
+const B1_DONE_ID = @get_local_task_id(13);
+const GEMM_TASK_ID = @get_local_task_id(14);
+const COMPUTE_DONE_ID = @get_local_task_id(15);
+
+const memcpy = @import_module("<memcpy/get_params>", .{
+    .width = P,
+    .height = P
+});
+
+layout {
+    @set_rectangle(P, P);
+
+    for (@range(u16, P)) |px| {
+        const memcpy_params = memcpy.get_params(px);
+        for (@range(u16, P)) |py| {
+            @set_tile_code(px, py, "pe.csl", .{
+                .memcpy_params = memcpy_params,
+                .P = P,
+                .Mt = Mt,
+                .Kt = Kt,
+                .Nt = Nt,
+                .a_color_0 = a_color_0,
+                .b_color_0 = b_color_0,
+                .a_color_1 = a_color_1,
+                .b_color_1 = b_color_1,
+                .EXIT_TASK_ID = EXIT_TASK_ID,
+                .A0_DONE_ID = A0_DONE_ID,
+                .B0_DONE_ID = B0_DONE_ID,
+                .A1_DONE_ID = A1_DONE_ID,
+                .B1_DONE_ID = B1_DONE_ID,
+                .GEMM_TASK_ID = GEMM_TASK_ID,
+                .COMPUTE_DONE_ID = COMPUTE_DONE_ID,
+            });
+
+            // Static routing for all 4 colors
+            // a_color_0: Row broadcast (horizontal)
+            @set_color_config(px, py, a_color_0, .{
+                .routes = .{
+                    .rx = .{WEST},
+                    .tx = .{RAMP, EAST},
+                },
+            });
+
+            // b_color_0: Column broadcast (vertical)
+            @set_color_config(px, py, b_color_0, .{
+                .routes = .{
+                    .rx = .{NORTH},
+                    .tx = .{RAMP, SOUTH},
+                },
+            });
+
+            // a_color_1: Row broadcast (horizontal)
+            @set_color_config(px, py, a_color_1, .{
+                .routes = .{
+                    .rx = .{WEST},
+                    .tx = .{RAMP, EAST},
+                },
+            });
+
+            // b_color_1: Column broadcast (vertical)
+            @set_color_config(px, py, b_color_1, .{
+                .routes = .{
+                    .rx = .{NORTH},
+                    .tx = .{RAMP, SOUTH},
+                },
+            });
+        }
+    }
+
+    // Export symbols for host access
+    @export_name("A_tile", [*]f32, true);
+    @export_name("B_tile", [*]f32, true);
+    @export_name("C_tile", [*]f32, true);
+    @export_name("main", fn()void);
+}

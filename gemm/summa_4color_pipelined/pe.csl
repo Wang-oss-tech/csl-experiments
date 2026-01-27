@@ -1,0 +1,348 @@
+// SUMMA PE with 4-Color Alternating Pipeline
+//
+// Strategy: Use 2 pairs of colors, alternate between them
+// - Even steps (0,2,4,...): Use a_color_0, b_color_0
+// - Odd steps (1,3,5,...):  Use a_color_1, b_color_1
+// - No runtime reconfiguration needed!
+// - All routing is static (compile-time)
+//
+// Pipeline: broadcast(k+1) overlaps with GEMM(k)
+
+param memcpy_params: comptime_struct;
+param P: u16;
+param Mt: i16;
+param Kt: i16;
+param Nt: i16;
+
+param a_color_0: color;
+param b_color_0: color;
+param a_color_1: color;
+param b_color_1: color;
+
+param EXIT_TASK_ID: local_task_id;
+param A0_DONE_ID: local_task_id;
+param B0_DONE_ID: local_task_id;
+param A1_DONE_ID: local_task_id;
+param B1_DONE_ID: local_task_id;
+param GEMM_TASK_ID: local_task_id;
+param COMPUTE_DONE_ID: local_task_id;
+
+const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
+
+// Import layout module to get PE coordinates
+const layout_mod = @import_module("<layout>");
+
+// ============================================================================
+// PE State
+// ============================================================================
+
+var px: u16 = 0;
+var py: u16 = 0;
+
+// Home tiles (populated by host)
+var A_tile = @zeros([Mt * Kt]f32);
+var B_tile = @zeros([Kt * Nt]f32);
+var C_tile = @zeros([Mt * Nt]f32);
+
+// Double buffers: step k uses buffer[k % 2]
+var A_recv_0 = @zeros([Mt * Kt]f32);
+var A_recv_1 = @zeros([Mt * Kt]f32);
+var B_recv_0 = @zeros([Kt * Nt]f32);
+var B_recv_1 = @zeros([Kt * Nt]f32);
+
+// Pointers for export
+var ptr_A: [*]f32 = &A_tile;
+var ptr_B: [*]f32 = &B_tile;
+var ptr_C: [*]f32 = &C_tile;
+
+// Pipeline state
+var bcast_step: u16 = 0;      // Next broadcast to start
+var compute_step: u16 = 0;    // Next GEMM to compute
+var bcast_in_progress: bool = false;
+var compute_in_progress: bool = false;
+
+// Per-color-pair completion tracking
+var a0_done: bool = false;
+var b0_done: bool = false;
+var a1_done: bool = false;
+var b1_done: bool = false;
+
+// For GEMM task
+var gemm_k: u16 = 0;
+
+// ============================================================================
+// Buffer Selection
+// ============================================================================
+
+fn get_A_buffer(step: u16) *[Mt * Kt]f32 {
+    return if (step % 2 == 0) &A_recv_0 else &A_recv_1;
+}
+
+fn get_B_buffer(step: u16) *[Kt * Nt]f32 {
+    return if (step % 2 == 0) &B_recv_0 else &B_recv_1;
+}
+
+// ============================================================================
+// Fabric DSDs (4 pairs: one per color)
+// ============================================================================
+
+// Color pair 0 (even steps)
+const fab_a0_in = @get_dsd(fabin_dsd, .{
+    .extent = Mt * Kt,
+    .fabric_color = a_color_0,
+    .input_queue = @get_input_queue(2),
+});
+
+const fab_a0_out = @get_dsd(fabout_dsd, .{
+    .extent = Mt * Kt,
+    .fabric_color = a_color_0,
+    .output_queue = @get_output_queue(2),
+});
+
+const fab_b0_in = @get_dsd(fabin_dsd, .{
+    .extent = Kt * Nt,
+    .fabric_color = b_color_0,
+    .input_queue = @get_input_queue(3),
+});
+
+const fab_b0_out = @get_dsd(fabout_dsd, .{
+    .extent = Kt * Nt,
+    .fabric_color = b_color_0,
+    .output_queue = @get_output_queue(3),
+});
+
+// Color pair 1 (odd steps)
+const fab_a1_in = @get_dsd(fabin_dsd, .{
+    .extent = Mt * Kt,
+    .fabric_color = a_color_1,
+    .input_queue = @get_input_queue(4),
+});
+
+const fab_a1_out = @get_dsd(fabout_dsd, .{
+    .extent = Mt * Kt,
+    .fabric_color = a_color_1,
+    .output_queue = @get_output_queue(4),
+});
+
+const fab_b1_in = @get_dsd(fabin_dsd, .{
+    .extent = Kt * Nt,
+    .fabric_color = b_color_1,
+    .input_queue = @get_input_queue(5),
+});
+
+const fab_b1_out = @get_dsd(fabout_dsd, .{
+    .extent = Kt * Nt,
+    .fabric_color = b_color_1,
+    .output_queue = @get_output_queue(5),
+});
+
+// Memory DSDs
+var mem_A_tile = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Mt * Kt} -> A_tile[i],
+});
+
+var mem_B_tile = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Kt * Nt} -> B_tile[i],
+});
+
+var mem_A_recv_0 = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Mt * Kt} -> A_recv_0[i],
+});
+
+var mem_A_recv_1 = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Mt * Kt} -> A_recv_1[i],
+});
+
+var mem_B_recv_0 = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Kt * Nt} -> B_recv_0[i],
+});
+
+var mem_B_recv_1 = @get_dsd(mem1d_dsd, .{
+    .tensor_access = |i|{Kt * Nt} -> B_recv_1[i],
+});
+
+// ============================================================================
+// Broadcast Operations
+// ============================================================================
+
+fn start_broadcast(step: u16) void {
+    bcast_in_progress = true;
+
+    // Select receive DSDs based on step parity
+    const recv_A_dsd = if (step % 2 == 0) mem_A_recv_0 else mem_A_recv_1;
+    const recv_B_dsd = if (step % 2 == 0) mem_B_recv_0 else mem_B_recv_1;
+
+    // Choose color pair based on even/odd step
+    if (step % 2 == 0) {
+        // Even step: use color pair 0
+        a0_done = false;
+        b0_done = false;
+
+        if (px == step) {
+            @fmovs(fab_a0_out, mem_A_tile, .{ .async = true, .activate = A0_DONE_ID });
+        } else {
+            @fmovs(recv_A_dsd, fab_a0_in, .{ .async = true, .activate = A0_DONE_ID });
+        }
+
+        if (py == step) {
+            @fmovs(fab_b0_out, mem_B_tile, .{ .async = true, .activate = B0_DONE_ID });
+        } else {
+            @fmovs(recv_B_dsd, fab_b0_in, .{ .async = true, .activate = B0_DONE_ID });
+        }
+    } else {
+        // Odd step: use color pair 1
+        a1_done = false;
+        b1_done = false;
+
+        if (px == step) {
+            @fmovs(fab_a1_out, mem_A_tile, .{ .async = true, .activate = A1_DONE_ID });
+        } else {
+            @fmovs(recv_A_dsd, fab_a1_in, .{ .async = true, .activate = A1_DONE_ID });
+        }
+
+        if (py == step) {
+            @fmovs(fab_b1_out, mem_B_tile, .{ .async = true, .activate = B1_DONE_ID });
+        } else {
+            @fmovs(recv_B_dsd, fab_b1_in, .{ .async = true, .activate = B1_DONE_ID });
+        }
+    }
+}
+
+// ============================================================================
+// Broadcast Completion Handlers
+// ============================================================================
+
+task a0_done_task() void {
+    a0_done = true;
+    if (b0_done and bcast_in_progress) {
+        on_broadcast_complete();
+    }
+}
+
+task b0_done_task() void {
+    b0_done = true;
+    if (a0_done and bcast_in_progress) {
+        on_broadcast_complete();
+    }
+}
+
+task a1_done_task() void {
+    a1_done = true;
+    if (b1_done and bcast_in_progress) {
+        on_broadcast_complete();
+    }
+}
+
+task b1_done_task() void {
+    b1_done = true;
+    if (a1_done and bcast_in_progress) {
+        on_broadcast_complete();
+    }
+}
+
+fn on_broadcast_complete() void {
+    bcast_in_progress = false;
+    bcast_step += 1;
+
+    // Start next broadcast if there are more
+    if (bcast_step < P) {
+        start_broadcast(bcast_step);
+    }
+
+    // Try to start compute if ready
+    try_start_compute();
+}
+
+// ============================================================================
+// Compute Operations
+// ============================================================================
+
+fn try_start_compute() void {
+    // Can compute step k if:
+    // 1. Not already computing
+    // 2. Broadcast k is done (bcast_step > compute_step)
+    // 3. Haven't finished all computes yet
+    if (!compute_in_progress and compute_step < bcast_step and compute_step < P) {
+        compute_in_progress = true;
+        gemm_k = compute_step;
+        @activate(GEMM_TASK_ID);  // ← Activate as TASK (non-blocking!)
+    }
+}
+
+task gemm_task() void {
+    const k = gemm_k;
+
+    // Get pointers to A and B data for step k
+    const Ap = if (px == k) &A_tile else get_A_buffer(k);
+    const Bp = if (py == k) &B_tile else get_B_buffer(k);
+
+    // Local GEMM: C += A * B
+    var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
+    A_dsd = @set_dsd_base_addr(A_dsd, Ap);
+
+    for (@range(i16, Kt)) |kk| {
+        var C_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C_tile[i] });
+
+        for (@range(i16, Nt)) |j| {
+            const b = Bp.*[@as(u16, j) * @as(u16, Kt) + @as(u16, kk)];
+            @fmacs(C_dsd, C_dsd, A_dsd, b);
+            C_dsd = @increment_dsd_offset(C_dsd, Mt, f32);
+        }
+        A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
+    }
+
+    @activate(COMPUTE_DONE_ID);
+}
+
+task compute_done_task() void {
+    compute_in_progress = false;
+    compute_step += 1;
+
+    // Try to start next compute
+    try_start_compute();
+
+    // If all done, exit
+    if (compute_step >= P) {
+        @activate(EXIT_TASK_ID);
+    }
+}
+
+task exit_task() void {
+    sys_mod.unblock_cmd_stream();
+}
+
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+fn main() void {
+    px = @as(u16, layout_mod.get_x_coord());
+    py = @as(u16, layout_mod.get_y_coord());
+
+    // Start pipeline: initiate first broadcast
+    start_broadcast(0);
+}
+
+comptime {
+    // Block all 4 colors at compile time
+    // This ensures fabin reads from queue instead of triggering tasks
+    @block(a_color_0);
+    @block(b_color_0);
+    @block(a_color_1);
+    @block(b_color_1);
+
+    // Bind tasks
+    @bind_local_task(a0_done_task, A0_DONE_ID);
+    @bind_local_task(b0_done_task, B0_DONE_ID);
+    @bind_local_task(a1_done_task, A1_DONE_ID);
+    @bind_local_task(b1_done_task, B1_DONE_ID);
+    @bind_local_task(gemm_task, GEMM_TASK_ID);
+    @bind_local_task(compute_done_task, COMPUTE_DONE_ID);
+    @bind_local_task(exit_task, EXIT_TASK_ID);
+
+    // Export symbols
+    @export_symbol(ptr_A, "A_tile");
+    @export_symbol(ptr_B, "B_tile");
+    @export_symbol(ptr_C, "C_tile");
+    @export_symbol(main);
+}
