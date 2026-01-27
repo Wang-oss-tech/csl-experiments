@@ -1,11 +1,14 @@
-// SUMMA PE Program with Pipelined Broadcasts
+// SUMMA PE Program with Pipelined Broadcasts (v2)
 //
-// Overlaps communication with computation using double buffering:
-// - Broadcast(k+1) runs in parallel with GEMM(k)
-// - Uses alternating buffers: step k uses buffer[k % 2]
+// Overlaps communication with computation using double buffering.
+// Key insight: broadcast takes ~600 cycles, GEMM takes ~11,000 cycles.
+// So broadcast(k) ALWAYS finishes during GEMM(k-1). No callback needed.
 //
-// Pipeline flow:
-//   broadcast(0) → broadcast(1) + GEMM(0) → broadcast(2) + GEMM(1) → ... → GEMM(P-1)
+// Flow:
+//   broadcast(0) [wait] → config(1) + broadcast(1) + GEMM(0)
+//                       → config(2) + broadcast(2) + GEMM(1)
+//                       → ...
+//                       → GEMM(P-1) → done
 
 param memcpy_params: comptime_struct;
 param P: u16;
@@ -22,6 +25,7 @@ param COMPUTE_DONE_ID: local_task_id;
 
 const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
 const layout_mod = @import_module("<layout>");
+const prt = @import_module("<simprint>");
 
 // ============================================================================
 // Color Config Register Access
@@ -59,7 +63,6 @@ var B_tile = @zeros([Kt * Nt]f32);
 var C_tile = @zeros([Mt * Nt]f32);
 
 // Double buffers for receiving broadcast data
-// Step k uses buffer[k % 2]
 var A_recv_0 = @zeros([Mt * Kt]f32);
 var A_recv_1 = @zeros([Mt * Kt]f32);
 var B_recv_0 = @zeros([Kt * Nt]f32);
@@ -74,11 +77,7 @@ var ptr_C: [*]f32 = &C_tile;
 var a_color_addr: u16 = 0;
 var b_color_addr: u16 = 0;
 
-// Pipeline state
-var bcast_step: u16 = 0;      // Next broadcast to start (0..bcast_step-1 are done)
-var compute_step: u16 = 0;    // Next GEMM to do (0..compute_step-1 are done)
-var bcast_in_progress: bool = false;
-var compute_in_progress: bool = false;
+// Synchronization for first broadcast only
 var a_bcast_done: bool = false;
 var b_bcast_done: bool = false;
 
@@ -103,11 +102,8 @@ var fab_a_in  = @get_dsd(fabin_dsd,  .{ .extent = Mt * Kt, .fabric_color = a_col
 var fab_b_out = @get_dsd(fabout_dsd, .{ .extent = Kt * Nt, .fabric_color = b_color, .output_queue = @get_output_queue(3) });
 var fab_b_in  = @get_dsd(fabin_dsd,  .{ .extent = Kt * Nt, .fabric_color = b_color, .input_queue = @get_input_queue(3) });
 
-// Memory DSDs for home tiles
 var mem_A_tile = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt * Kt} -> A_tile[i] });
 var mem_B_tile = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Kt * Nt} -> B_tile[i] });
-
-// Memory DSDs for receive buffers (will set base addr dynamically)
 var mem_A_recv = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt * Kt} -> A_recv_0[i] });
 var mem_B_recv = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Kt * Nt} -> B_recv_0[i] });
 
@@ -176,86 +172,71 @@ fn configure_col_broadcast(k: u16) void {
 }
 
 // ============================================================================
-// Broadcast Operations
+// Broadcast - start async, no callback needed for steps 1+
 // ============================================================================
 
-fn start_broadcast(k: u16) void {
-    // Configure routing for this broadcast
+fn start_broadcast_async(k: u16) void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Starting async broadcast ");
+        prt.print_u16_decimal(k);
+        prt.print_string("\n");
+    }
     configure_row_broadcast(k);
     configure_col_broadcast(k);
 
-    // Reset completion flags
-    a_bcast_done = false;
-    b_bcast_done = false;
-    bcast_in_progress = true;
-
-    // Set receive buffer for this step
     mem_A_recv = @set_dsd_base_addr(mem_A_recv, get_A_buffer(k));
     mem_B_recv = @set_dsd_base_addr(mem_B_recv, get_B_buffer(k));
 
-    // Start A broadcast
     if (px == k) {
+        @fmovs(fab_a_out, mem_A_tile, .{ .async = true });
+    } else {
+        @fmovs(mem_A_recv, fab_a_in, .{ .async = true });
+    }
+
+    if (py == k) {
+        @fmovs(fab_b_out, mem_B_tile, .{ .async = true });
+    } else {
+        @fmovs(mem_B_recv, fab_b_in, .{ .async = true });
+    }
+}
+
+// Broadcast 0 uses callbacks since there's no GEMM to hide behind
+fn start_broadcast_0() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Starting broadcast 0 (with callback)\n");
+    }
+    configure_row_broadcast(0);
+    configure_col_broadcast(0);
+
+    mem_A_recv = @set_dsd_base_addr(mem_A_recv, get_A_buffer(0));
+    mem_B_recv = @set_dsd_base_addr(mem_B_recv, get_B_buffer(0));
+
+    if (px == 0) {
         @fmovs(fab_a_out, mem_A_tile, .{ .async = true, .activate = A_BCAST_DONE_ID });
     } else {
         @fmovs(mem_A_recv, fab_a_in, .{ .async = true, .activate = A_BCAST_DONE_ID });
     }
 
-    // Start B broadcast
-    if (py == k) {
+    if (py == 0) {
         @fmovs(fab_b_out, mem_B_tile, .{ .async = true, .activate = B_BCAST_DONE_ID });
     } else {
         @fmovs(mem_B_recv, fab_b_in, .{ .async = true, .activate = B_BCAST_DONE_ID });
     }
 }
 
-task a_bcast_done_task() void {
-    a_bcast_done = true;
-    if (b_bcast_done) {
-        on_broadcast_complete();
-    }
-}
-
-task b_bcast_done_task() void {
-    b_bcast_done = true;
-    if (a_bcast_done) {
-        on_broadcast_complete();
-    }
-}
-
-fn on_broadcast_complete() void {
-    bcast_in_progress = false;
-    bcast_step += 1;
-
-    // Start next broadcast if there are more
-    if (bcast_step < P) {
-        start_broadcast(bcast_step);
-    }
-
-    // Try to start compute if not already running
-    try_start_compute();
-}
-
 // ============================================================================
-// Compute Operations
+// GEMM
 // ============================================================================
-
-fn try_start_compute() void {
-    // Can compute step k if:
-    // 1. Not already computing
-    // 2. Broadcast k is done (bcast_step > compute_step)
-    // 3. Haven't finished all computes yet
-    if (!compute_in_progress and compute_step < bcast_step and compute_step < P) {
-        compute_in_progress = true;
-        do_gemm(compute_step);
-    }
-}
 
 fn do_gemm(k: u16) void {
-    // Get pointers to A and B data for step k
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Starting GEMM ");
+        prt.print_u16_decimal(k);
+        prt.print_string("\n");
+    }
     const Ap = if (px == k) &A_tile else get_A_buffer(k);
     const Bp = if (py == k) &B_tile else get_B_buffer(k);
 
-    // Local GEMM: C += A * B
     var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
     A_dsd = @set_dsd_base_addr(A_dsd, Ap);
 
@@ -269,22 +250,56 @@ fn do_gemm(k: u16) void {
         }
         A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
     }
-
-    // Signal completion
-    @activate(COMPUTE_DONE_ID);
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Finished GEMM ");
+        prt.print_u16_decimal(k);
+        prt.print_string("\n");
+    }
 }
 
-task compute_done_task() void {
-    compute_in_progress = false;
-    compute_step += 1;
+// ============================================================================
+// First broadcast callback → kicks off the pipeline loop
+// ============================================================================
 
-    if (compute_step == P) {
-        // All done
-        @activate(EXIT_TASK_ID);
-    } else {
-        // Try to start next compute
-        try_start_compute();
+task a_bcast_done_task() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): A bcast 0 done\n");
     }
+    a_bcast_done = true;
+    if (b_bcast_done) {
+        @activate(COMPUTE_DONE_ID);
+    }
+}
+
+task b_bcast_done_task() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): B bcast 0 done\n");
+    }
+    b_bcast_done = true;
+    if (a_bcast_done) {
+        @activate(COMPUTE_DONE_ID);
+    }
+}
+
+// This task runs the entire pipeline after broadcast 0 completes
+task run_pipeline() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Pipeline started\n");
+    }
+    // Broadcast 0 is done. Now pipeline: start bcast(k+1) then GEMM(k).
+    var k: u16 = 1;
+    while (k < P) : (k += 1) {
+        // Start broadcast(k) async - it will complete during GEMM(k-1)
+        start_broadcast_async(k);
+        // GEMM(k-1) blocks - broadcast(k) finishes during this (~600 vs ~11000 cycles)
+        do_gemm(k - 1);
+    }
+
+    // Last GEMM - no more broadcasts needed
+    do_gemm(P - 1);
+
+    // Done
+    sys_mod.unblock_cmd_stream();
 }
 
 // ============================================================================
@@ -292,22 +307,17 @@ task compute_done_task() void {
 // ============================================================================
 
 fn main() void {
-    // Initialize PE coordinates
     px = @as(u16, layout_mod.get_x_coord());
     py = @as(u16, layout_mod.get_y_coord());
 
-    // Get color config register addresses
     a_color_addr = get_color_config_addr(a_color);
     b_color_addr = get_color_config_addr(b_color);
 
-    // Initialize state
-    bcast_step = 0;
-    compute_step = 0;
-    bcast_in_progress = false;
-    compute_in_progress = false;
+    a_bcast_done = false;
+    b_bcast_done = false;
 
-    // Start first broadcast - this kicks off the pipeline
-    start_broadcast(0);
+    // Start broadcast 0 with callback - no GEMM to hide behind
+    start_broadcast_0();
 }
 
 task exit_task() void {
@@ -319,17 +329,14 @@ task exit_task() void {
 // ============================================================================
 
 comptime {
-    // Block colors at comptime
     @block(a_color);
     @block(b_color);
 
-    // Bind tasks
     @bind_local_task(a_bcast_done_task, A_BCAST_DONE_ID);
     @bind_local_task(b_bcast_done_task, B_BCAST_DONE_ID);
-    @bind_local_task(compute_done_task, COMPUTE_DONE_ID);
+    @bind_local_task(run_pipeline, COMPUTE_DONE_ID);
     @bind_local_task(exit_task, EXIT_TASK_ID);
 
-    // Export symbols
     @export_symbol(ptr_A, "A");
     @export_symbol(ptr_B, "B");
     @export_symbol(ptr_C, "C");

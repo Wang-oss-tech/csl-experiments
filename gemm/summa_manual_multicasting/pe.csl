@@ -25,6 +25,9 @@ const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
 // Import layout module to get PE coordinates
 const layout_mod = @import_module("<layout>");
 
+// Import simprint for debugging
+const prt = @import_module("<simprint>");
+
 // ============================================================================
 // Color Config Register Access (from wse2_color_config.csl)
 // ============================================================================
@@ -189,6 +192,11 @@ fn configure_col_broadcast(k: u16) void {
 // ============================================================================
 
 task a_done_task() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): A broadcast done, step ");
+        prt.print_u16_decimal(step);
+        prt.print_string("\n");
+    }
     a_done = true;
     if (b_done) {
         @activate(COMPUTE_TASK_ID);
@@ -196,6 +204,11 @@ task a_done_task() void {
 }
 
 task b_done_task() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): B broadcast done, step ");
+        prt.print_u16_decimal(step);
+        prt.print_string("\n");
+    }
     b_done = true;
     if (a_done) {
         @activate(COMPUTE_TASK_ID);
@@ -229,6 +242,12 @@ fn do_broadcast_B() void {
 // ============================================================================
 
 task compute_task() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Starting compute step ");
+        prt.print_u16_decimal(step);
+        prt.print_string("\n");
+    }
+    
     // Get pointers to A and B data for this step
     const Ap: [*]f32 = if (px == step) &A_tile else &A_recv;
     const Bp: [*]f32 = if (py == step) &B_tile else &B_recv;
@@ -248,6 +267,12 @@ task compute_task() void {
         A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
     }
 
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Finished compute step ");
+        prt.print_u16_decimal(step);
+        prt.print_string("\n");
+    }
+    
     // Move to next step
     step += 1;
 
@@ -267,6 +292,12 @@ task compute_task() void {
 // ============================================================================
 
 fn summa_step() void {
+    if (px == 1 and py == 1) {
+        prt.print_string("PE(1,1): Starting summa_step ");
+        prt.print_u16_decimal(step);
+        prt.print_string("\n");
+    }
+    
     // Reset synchronization flags
     a_done = false;
     b_done = false;
