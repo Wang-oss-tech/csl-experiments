@@ -24,8 +24,6 @@ param b_even_color: color;
 param b_odd_color: color;
 
 param EXIT_TASK_ID: local_task_id;
-param A_BCAST_DONE_ID: local_task_id;
-param B_BCAST_DONE_ID: local_task_id;
 param COMPUTE_DONE_ID: local_task_id;
 
 const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
@@ -84,9 +82,6 @@ var a_odd_addr: u16 = 0;
 var b_even_addr: u16 = 0;
 var b_odd_addr: u16 = 0;
 
-// Synchronization for first broadcast
-var a_bcast_done: bool = false;
-var b_bcast_done: bool = false;
 
 // ============================================================================
 // Buffer Selection
@@ -189,22 +184,33 @@ fn configure_col_broadcast(k: u16, color_addr: u16) void {
 // ============================================================================
 
 fn start_broadcast_0() void {
+    prt.print_string("Starting broadcast 0 at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     configure_row_broadcast(0, a_even_addr);
     configure_col_broadcast(0, b_even_addr);
+    prt.print_string("Configured broadcast 0 at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+
 
     mem_A_recv = @set_dsd_base_addr(mem_A_recv, get_A_buffer(0));
     mem_B_recv = @set_dsd_base_addr(mem_B_recv, get_B_buffer(0));
 
     if (px == 0) {
-        @fmovs(fab_a_even_out, mem_A_tile, .{ .async = true, .activate = A_BCAST_DONE_ID });
+        @fmovs(fab_a_even_out, mem_A_tile, .{ .async = true });
     } else {
-        @fmovs(mem_A_recv, fab_a_even_in, .{ .async = true, .activate = A_BCAST_DONE_ID });
+        @fmovs(mem_A_recv, fab_a_even_in, .{ .async = true });
     }
 
     if (py == 0) {
-        @fmovs(fab_b_even_out, mem_B_tile, .{ .async = true, .activate = B_BCAST_DONE_ID });
+        @fmovs(fab_b_even_out, mem_B_tile, .{ .async = true, .activate = COMPUTE_DONE_ID });
     } else {
-        @fmovs(mem_B_recv, fab_b_even_in, .{ .async = true, .activate = B_BCAST_DONE_ID });
+        @fmovs(mem_B_recv, fab_b_even_in, .{ .async = true, .activate = COMPUTE_DONE_ID });
     }
 }
 
@@ -213,6 +219,13 @@ fn start_broadcast_0() void {
 // ============================================================================
 
 fn start_broadcast_async(k: u16) void {
+    prt.print_string("Starting broadcast ");
+    prt.print_u16_decimal(k);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     if (k % 2 == 0) {
         configure_row_broadcast(k, a_even_addr);
         configure_col_broadcast(k, b_even_addr);
@@ -220,7 +233,13 @@ fn start_broadcast_async(k: u16) void {
         configure_row_broadcast(k, a_odd_addr);
         configure_col_broadcast(k, b_odd_addr);
     }
-
+    prt.print_string("Configured broadcast ");
+    prt.print_u16_decimal(k);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     mem_A_recv = @set_dsd_base_addr(mem_A_recv, get_A_buffer(k));
     mem_B_recv = @set_dsd_base_addr(mem_B_recv, get_B_buffer(k));
 
@@ -249,6 +268,13 @@ fn start_broadcast_async(k: u16) void {
             @fmovs(mem_B_recv, fab_b_odd_in, .{ .async = true });
         }
     }
+    prt.print_string("Finished broadcast ");
+    prt.print_u16_decimal(k);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
 }
 
 // ============================================================================
@@ -256,7 +282,7 @@ fn start_broadcast_async(k: u16) void {
 // ============================================================================
 
 fn do_gemm(k: u16) void {
-    prt.print_string("hi Starting GEMM ");
+    prt.print_string("Starting GEMM ");
     prt.print_u16_decimal(k);
     prt.print_string(" location ");
     prt.print_u16_decimal(px);
@@ -292,25 +318,17 @@ fn do_gemm(k: u16) void {
 // First broadcast callbacks → kick off the pipeline
 // ============================================================================
 
-task a_bcast_done_task() void {
-    a_bcast_done = true;
-    if (b_bcast_done) {
-        @activate(COMPUTE_DONE_ID);
-    }
-}
-
-task b_bcast_done_task() void {
-    b_bcast_done = true;
-    if (a_bcast_done) {
-        @activate(COMPUTE_DONE_ID);
-    }
-}
 
 // ============================================================================
 // Pipeline — runs after broadcast 0 completes
 // ============================================================================
 
 task run_pipeline() void {
+    prt.print_string("Broadcast 0 completed, Starting pipeline at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     var k: u16 = 1;
     while (k < P) : (k += 1) {
         // Start broadcast k on the alternate color pair (async)
@@ -339,9 +357,6 @@ fn main() void {
     b_even_addr = get_color_config_addr(b_even_color);
     b_odd_addr  = get_color_config_addr(b_odd_color);
 
-    a_bcast_done = false;
-    b_bcast_done = false;
-
     start_broadcast_0();
 }
 
@@ -359,8 +374,6 @@ comptime {
     @block(b_even_color);
     @block(b_odd_color);
 
-    @bind_local_task(a_bcast_done_task, A_BCAST_DONE_ID);
-    @bind_local_task(b_bcast_done_task, B_BCAST_DONE_ID);
     @bind_local_task(run_pipeline, COMPUTE_DONE_ID);
     @bind_local_task(exit_task, EXIT_TASK_ID);
 

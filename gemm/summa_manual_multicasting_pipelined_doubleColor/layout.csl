@@ -16,9 +16,7 @@ const b_odd_color:  color = @get_color(3);
 
 // Task IDs
 const EXIT_TASK_ID:     local_task_id = @get_local_task_id(10);
-const A_BCAST_DONE_ID:  local_task_id = @get_local_task_id(11);
-const B_BCAST_DONE_ID:  local_task_id = @get_local_task_id(12);
-const COMPUTE_DONE_ID:  local_task_id = @get_local_task_id(13);
+const COMPUTE_DONE_ID:  local_task_id = @get_local_task_id(11);
 
 const memcpy = @import_module("<memcpy/get_params>", .{
   .width = P,
@@ -42,8 +40,6 @@ layout {
         .b_even_color = b_even_color,
         .b_odd_color = b_odd_color,
         .EXIT_TASK_ID = EXIT_TASK_ID,
-        .A_BCAST_DONE_ID = A_BCAST_DONE_ID,
-        .B_BCAST_DONE_ID = B_BCAST_DONE_ID,
         .COMPUTE_DONE_ID = COMPUTE_DONE_ID,
       });
     }
