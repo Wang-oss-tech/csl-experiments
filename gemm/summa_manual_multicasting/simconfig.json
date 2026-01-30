@@ -14,7 +14,9 @@
     },
     "mode": ""
   },
-  "debug": [],
+  "debug": [
+    "landing"
+  ],
   "delayedQueueService": 0,
   "dieModel": {
     "latency": 0,

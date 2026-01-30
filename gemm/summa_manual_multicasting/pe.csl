@@ -192,11 +192,14 @@ fn configure_col_broadcast(k: u16) void {
 // ============================================================================
 
 task a_done_task() void {
-    if (px == 1 and py == 1) {
-        prt.print_string("PE(1,1): A broadcast done, step ");
-        prt.print_u16_decimal(step);
-        prt.print_string("\n");
-    }
+    prt.print_string("A broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" completed at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+    
     a_done = true;
     if (b_done) {
         @activate(COMPUTE_TASK_ID);
@@ -204,11 +207,14 @@ task a_done_task() void {
 }
 
 task b_done_task() void {
-    if (px == 1 and py == 1) {
-        prt.print_string("PE(1,1): B broadcast done, step ");
-        prt.print_u16_decimal(step);
-        prt.print_string("\n");
-    }
+    prt.print_string("B broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" completed at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+    
     b_done = true;
     if (a_done) {
         @activate(COMPUTE_TASK_ID);
@@ -216,6 +222,14 @@ task b_done_task() void {
 }
 
 fn do_broadcast_A() void {
+    prt.print_string("Starting A broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+    
     // Colors stay blocked - fabin requires blocked color to read from queue
     if (px == step) {
         // I am root: send my A_tile
@@ -227,6 +241,14 @@ fn do_broadcast_A() void {
 }
 
 fn do_broadcast_B() void {
+    prt.print_string("Starting B broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+    
     // Colors stay blocked - fabin requires blocked color to read from queue
     if (py == step) {
         // I am root: send my B_tile
@@ -242,11 +264,13 @@ fn do_broadcast_B() void {
 // ============================================================================
 
 task compute_task() void {
-    if (px == 1 and py == 1) {
-        prt.print_string("PE(1,1): Starting compute step ");
-        prt.print_u16_decimal(step);
-        prt.print_string("\n");
-    }
+    prt.print_string("Starting GEMM ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     
     // Get pointers to A and B data for this step
     const Ap: [*]f32 = if (px == step) &A_tile else &A_recv;
@@ -267,11 +291,13 @@ task compute_task() void {
         A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
     }
 
-    if (px == 1 and py == 1) {
-        prt.print_string("PE(1,1): Finished compute step ");
-        prt.print_u16_decimal(step);
-        prt.print_string("\n");
-    }
+    prt.print_string("Ending GEMM ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     
     // Move to next step
     step += 1;
@@ -292,11 +318,13 @@ task compute_task() void {
 // ============================================================================
 
 fn summa_step() void {
-    if (px == 1 and py == 1) {
-        prt.print_string("PE(1,1): Starting summa_step ");
-        prt.print_u16_decimal(step);
-        prt.print_string("\n");
-    }
+    prt.print_string("Starting broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
     
     // Reset synchronization flags
     a_done = false;
@@ -305,6 +333,14 @@ fn summa_step() void {
     // Configure routing for current step
     configure_row_broadcast(step);
     configure_col_broadcast(step);
+    
+    prt.print_string("Configured broadcast ");
+    prt.print_u16_decimal(step);
+    prt.print_string(" at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
 
     // Start both broadcasts
     do_broadcast_A();
@@ -315,6 +351,12 @@ fn main() void {
     // Initialize PE coordinates
     px = @as(u16, layout_mod.get_x_coord());
     py = @as(u16, layout_mod.get_y_coord());
+
+    prt.print_string("Main entry at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
 
     // Get color config register addresses
     a_color_addr = get_color_config_addr(a_color);
@@ -328,6 +370,12 @@ fn main() void {
 }
 
 task exit_task() void {
+    prt.print_string("All SUMMA steps completed at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+    
     sys_mod.unblock_cmd_stream();
 }
 

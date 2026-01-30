@@ -3,7 +3,7 @@
 set -e
 
 # Disable inst_trace for faster simulation
-# export SINGULARITYENV_SIMFABRIC_DEBUG=landing
+export SINGULARITYENV_SIMFABRIC_DEBUG=landing
 # export SINGULARITYENV_SIMFABRIC_DEBUG=inst_trace
 
 

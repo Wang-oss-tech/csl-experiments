@@ -56,6 +56,9 @@ const mpi_y = @import_module("<collectives_2d/pe>", .{
 // On WSE-3, memcpy uses input/output queues 0 and 1
 const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
 
+// Import simprint for debugging
+const prt = @import_module("<simprint>");
+
 const P = @get_rectangle().width;
 
 // This PE's home tile of A, B, C
@@ -77,10 +80,26 @@ var px: u16;
 var py: u16;
 
 task x_done() void {
+  prt.print_string("X broadcast ");
+  prt.print_u16_decimal(step);
+  prt.print_string(" completed at location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
+  
   @activate(compute_task_id);
 }
 
 task y_done() void {
+  prt.print_string("Y broadcast ");
+  prt.print_u16_decimal(step);
+  prt.print_string(" completed at location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
+  
   @unblock(compute_task_id);
 }
 
@@ -94,7 +113,21 @@ fn main() void {
     mpi_y.init();
     px = mpi_x.pe_id;
     py = mpi_y.pe_id;
+    
+    prt.print_string("Main entry at location ");
+    prt.print_u16_decimal(px);
+    prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
   }
+
+  prt.print_string("Starting broadcast ");
+  prt.print_u16_decimal(step);
+  prt.print_string(" at location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
 
   // Communicate along both rows and columns
   const Ap = if (px == step) &A_tile else &A_buffer;
@@ -104,6 +137,14 @@ fn main() void {
 }
 
 task compute() void {
+  prt.print_string("Starting GEMM ");
+  prt.print_u16_decimal(step);
+  prt.print_string(" location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
+  
   const Ap = if (px == step) &A_tile else &A_buffer;
   const Bp = if (py == step) &B_tile else &B_buffer;
 
@@ -122,6 +163,14 @@ task compute() void {
     A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
   }
 
+  prt.print_string("Ending GEMM ");
+  prt.print_u16_decimal(step);
+  prt.print_string(" location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
+
   step += 1;
   @block(compute_task_id);
 
@@ -133,6 +182,12 @@ task compute() void {
 }
 
 task f_exit() void {
+  prt.print_string("All SUMMA steps completed at location ");
+  prt.print_u16_decimal(px);
+  prt.print_string(",");
+  prt.print_u16_decimal(py);
+  prt.print_string("\n");
+  
   // the user must unblock cmd color for every PE
   sys_mod.unblock_cmd_stream();
 }
