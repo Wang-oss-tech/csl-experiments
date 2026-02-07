@@ -270,45 +270,6 @@ fn start_broadcast_async(k: u16) void {
     }
 }
 
-fn start_broadcast_async(k: u16) void {
-    if (k % 2 == 0) {
-        configure_row_broadcast(k, a_even_addr);
-        configure_col_broadcast(k, b_even_addr);
-    } else {
-        configure_row_broadcast(k, a_odd_addr);
-        configure_col_broadcast(k, b_odd_addr);
-    }
-
-    mem_A_recv = @set_dsd_base_addr(mem_A_recv, get_A_buffer(k));
-    mem_B_recv = @set_dsd_base_addr(mem_B_recv, get_B_buffer(k));
-
-    if (k % 2 == 0) {
-        // Even step — use even color pair
-        if (px == k) {
-            @fmovs(fab_a_even_out, mem_A_tile, .{ .async = true });
-        } else {
-            @fmovs(mem_A_recv, fab_a_even_in, .{ .async = true });
-        }
-        if (py == k) {
-            @fmovs(fab_b_even_out, mem_B_tile, .{ .async = true });
-        } else {
-            @fmovs(mem_B_recv, fab_b_even_in, .{ .async = true });
-        }
-    } else {
-        // Odd step — use odd color pair
-        if (px == k) {
-            @fmovs(fab_a_odd_out, mem_A_tile, .{ .async = true });
-        } else {
-            @fmovs(mem_A_recv, fab_a_odd_in, .{ .async = true });
-        }
-        if (py == k) {
-            @fmovs(fab_b_odd_out, mem_B_tile, .{ .async = true });
-        } else {
-            @fmovs(mem_B_recv, fab_b_odd_in, .{ .async = true });
-        }
-    }
-}
-
 // ============================================================================
 // GEMM
 // ============================================================================
@@ -345,31 +306,10 @@ fn do_gemm(k: u16) void {
     prt.print_u16_decimal(py);
     prt.print_string("\n");
 }
-
-
-fn do_gemm(k: u16) void {
-    const Ap = if (px == k) &A_tile else get_A_buffer(k);
-    const Bp = if (py == k) &B_tile else get_B_buffer(k);
-
-    var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
-    A_dsd = @set_dsd_base_addr(A_dsd, Ap);
-
-    for (@range(i16, Kt)) |kk| {
-        var C_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C_tile[i] });
-
-        for (@range(i16, Nt)) |j| {
-            const b = Bp.*[@as(u16, j) * @as(u16, Kt) + @as(u16, kk)]; // b scalar from dereferenced Bp
-            @fmacs(C_dsd, C_dsd, A_dsd, b);
-            C_dsd = @increment_dsd_offset(C_dsd, Mt, f32);
-        }
-        A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
-    }
-}
-
-
 // ============================================================================
 // First broadcast callbacks → kick off the pipeline
 // ============================================================================
+
 
 
 // ============================================================================
