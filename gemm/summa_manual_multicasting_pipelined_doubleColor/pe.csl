@@ -293,7 +293,19 @@ fn do_gemm(k: u16) void {
 
         for (@range(i16, Nt)) |j| {
             const b = Bp.*[@as(u16, j) * @as(u16, Kt) + @as(u16, kk)];
+
+            // if (px == 0 and py == 0) {
+            //     prt.print_string("Starting FMAC ");
+            //     prt.print_string("\n");
+            // }
+
             @fmacs(C_dsd, C_dsd, A_dsd, b);
+
+            // if (px == 0 and py == 0) {
+            //     prt.print_string("Ending FMAC ");
+            //     prt.print_string("\n");
+            // }
+
             C_dsd = @increment_dsd_offset(C_dsd, Mt, f32);
         }
         A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);

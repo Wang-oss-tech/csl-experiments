@@ -227,19 +227,19 @@ fn start_broadcast_0() void {
 // ============================================================================
 
 fn do_gemm(k: u16) void {
-    // prt.print_string("Starting GEMMn");
-    prt.print_string("New Starting GEMM ");
+    const Ap = if (px == k) &A_tile else get_A_buffer(k);
+    const Bp = if (py == k) &B_tile else get_B_buffer(k);
+
+    var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
+    A_dsd = @set_dsd_base_addr(A_dsd, Ap);
+
+    prt.print_string("Starting GEMM ");
     prt.print_u16_decimal(k);
     prt.print_string(" location ");
     prt.print_u16_decimal(px);
     prt.print_string(",");
     prt.print_u16_decimal(py);
     prt.print_string("\n");
-    const Ap = if (px == k) &A_tile else get_A_buffer(k);
-    const Bp = if (py == k) &B_tile else get_B_buffer(k);
-
-    var A_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A_tile[i] });
-    A_dsd = @set_dsd_base_addr(A_dsd, Ap);
 
     for (@range(i16, Kt)) |kk| {
         var C_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C_tile[i] });
