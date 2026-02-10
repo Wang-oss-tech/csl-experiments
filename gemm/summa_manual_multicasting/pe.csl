@@ -107,6 +107,11 @@ var b_done: bool = false;
 
 // Configure a_color for row broadcast with root at column k
 fn configure_row_broadcast(k: u16) void {
+    prt.print_string("Configuring row broadcast");
+    prt.print_u16_decimal(px);
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
+
     var r_state: u16 = @bitcast(*u16, a_color_addr).*;
     r_state = r_state & MASK_CLEAR_IO;
 
@@ -144,6 +149,11 @@ fn configure_row_broadcast(k: u16) void {
 
     @block(a_color);
     @bitcast(*u16, a_color_addr).* = r_state;
+    prt.print_string("Finished row broadcast");
+    prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    prt.print_u16_decimal(py);
+    prt.print_string("\n");
 }
 
 // Configure b_color for column broadcast with root at row k
@@ -192,14 +202,6 @@ fn configure_col_broadcast(k: u16) void {
 // ============================================================================
 
 task a_done_task() void {
-    prt.print_string("A broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" completed at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
-    
     a_done = true;
     if (b_done) {
         @activate(COMPUTE_TASK_ID);
@@ -207,14 +209,6 @@ task a_done_task() void {
 }
 
 task b_done_task() void {
-    prt.print_string("B broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" completed at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
-    
     b_done = true;
     if (a_done) {
         @activate(COMPUTE_TASK_ID);
@@ -222,13 +216,13 @@ task b_done_task() void {
 }
 
 fn do_broadcast_A() void {
-    prt.print_string("Starting A broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Starting A broadcast ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     // Colors stay blocked - fabin requires blocked color to read from queue
     if (px == step) {
@@ -241,13 +235,13 @@ fn do_broadcast_A() void {
 }
 
 fn do_broadcast_B() void {
-    prt.print_string("Starting B broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Starting B broadcast ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     // Colors stay blocked - fabin requires blocked color to read from queue
     if (py == step) {
@@ -264,13 +258,13 @@ fn do_broadcast_B() void {
 // ============================================================================
 
 task compute_task() void {
-    prt.print_string("Starting GEMM ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Starting GEMM ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     // Get pointers to A and B data for this step
     const Ap: [*]f32 = if (px == step) &A_tile else &A_recv;
@@ -291,13 +285,13 @@ task compute_task() void {
         A_dsd = @increment_dsd_offset(A_dsd, Mt, f32);
     }
 
-    prt.print_string("Ending GEMM ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Ending GEMM ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     // Move to next step
     step += 1;
@@ -318,13 +312,13 @@ task compute_task() void {
 // ============================================================================
 
 fn summa_step() void {
-    prt.print_string("Starting broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Starting broadcast ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     // Reset synchronization flags
     a_done = false;
@@ -334,13 +328,13 @@ fn summa_step() void {
     configure_row_broadcast(step);
     configure_col_broadcast(step);
     
-    prt.print_string("Configured broadcast ");
-    prt.print_u16_decimal(step);
-    prt.print_string(" at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Configured broadcast ");
+    // prt.print_u16_decimal(step);
+    // prt.print_string(" at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
 
     // Start both broadcasts
     do_broadcast_A();
@@ -352,11 +346,11 @@ fn main() void {
     px = @as(u16, layout_mod.get_x_coord());
     py = @as(u16, layout_mod.get_y_coord());
 
-    prt.print_string("Main entry at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Main entry at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
 
     // Get color config register addresses
     a_color_addr = get_color_config_addr(a_color);
@@ -370,11 +364,11 @@ fn main() void {
 }
 
 task exit_task() void {
-    prt.print_string("All SUMMA steps completed at location ");
-    prt.print_u16_decimal(px);
-    prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("All SUMMA steps completed at location ");
+    // prt.print_u16_decimal(px);
+    // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
     
     sys_mod.unblock_cmd_stream();
 }

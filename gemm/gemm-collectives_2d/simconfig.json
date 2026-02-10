@@ -15,7 +15,7 @@
     "mode": ""
   },
   "debug": [
-    "landing"
+    "inst_trace"
   ],
   "delayedQueueService": 0,
   "dieModel": {
