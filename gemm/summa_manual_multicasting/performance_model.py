@@ -6,6 +6,51 @@ def compute_iter(Mt, Kt, Nt):
       loop_control = 3  # SUB16 + MOV16 + JNC
       return Kt * Nt * (b_load + fmacs + dsd_increment + loop_control)
 
+def broadcast_iter(P, Mt, Nt):
+      configure_broadcast = 62
+      wavelet_broadcasting = 2 * (Mt * Nt)
+      callback_task = 13 + 13 # A_done + B_done
+      receive_hops = P * (P - 1)  # Total: 2*[(P-1) + (P-2) + ... + 1 + 0] = P*(P-1)
+      return configure_broadcast + wavelet_broadcasting + callback_task + receive_hops
+
+def h2d_memcpy(P, Mt, Kt, Nt):
+      startup_time = 1300 # fixed startup time
+      a_wavelet_transfer = Mt*Kt*P*P
+      a_to_b_switch = 1100
+      b_wavelet_transfer = Kt*Nt*P*P
+      finish_memcpy_launch_kernel = 330
+      return startup_time + a_wavelet_transfer + a_to_b_switch + \
+              b_wavelet_transfer + finish_memcpy_launch_kernel
+
+def d2h_memcpy(P, Mt, Nt):
+      wavelets = Mt*Nt
+      time_between_wavelet_transfers = 52
+      return wavelets * time_between_wavelet_transfers
+
+def total_cycles(P, Mt, Kt, Nt):
+      compute = compute_iter(Mt, Kt, Nt)
+      broadcast = broadcast_iter(P, Mt, Nt)
+      h2d = h2d_memcpy(P, Mt, Kt, Nt)
+      d2h = d2h_memcpy(P, Mt, Nt)
+      
+      kernel_cycles = P * (compute + broadcast)
+      io_cycles = h2d + d2h
+      
+      return kernel_cycles + io_cycles
+
+# Test with measured configuration
+if __name__ == "__main__":
+      P, Mt, Kt, Nt = 8, 28, 28, 28
+      
+      print(f"Configuration: P={P}, Mt={Mt}, Kt={Kt}, Nt={Nt}")
+      print(f"H2D cycles: {h2d_memcpy(P, Mt, Kt, Nt)}")
+      print(f"D2H cycles: {d2h_memcpy(P, Mt, Nt)}")
+      print(f"Compute per iter: {compute_iter(Mt, Kt, Nt)}")
+      print(f"Broadcast per iter: {broadcast_iter(P, Mt, Nt)}")
+      print(f"Total cycles: {total_cycles(P, Mt, Kt, Nt)}")
+
+
+
 
 
 

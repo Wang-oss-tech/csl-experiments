@@ -107,10 +107,10 @@ var b_done: bool = false;
 
 // Configure a_color for row broadcast with root at column k
 fn configure_row_broadcast(k: u16) void {
-    prt.print_string("Configuring row broadcast");
-    prt.print_u16_decimal(px);
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Configuring row broadcast");
+    // prt.print_u16_decimal(px);
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
 
     var r_state: u16 = @bitcast(*u16, a_color_addr).*;
     r_state = r_state & MASK_CLEAR_IO;
@@ -149,11 +149,11 @@ fn configure_row_broadcast(k: u16) void {
 
     @block(a_color);
     @bitcast(*u16, a_color_addr).* = r_state;
-    prt.print_string("Finished row broadcast");
-    prt.print_u16_decimal(px);
-    // prt.print_string(",");
-    prt.print_u16_decimal(py);
-    prt.print_string("\n");
+    // prt.print_string("Finished row broadcast");
+    // prt.print_u16_decimal(px);
+    // // prt.print_string(",");
+    // prt.print_u16_decimal(py);
+    // prt.print_string("\n");
 }
 
 // Configure b_color for column broadcast with root at row k
