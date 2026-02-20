@@ -28,6 +28,9 @@ const layout_mod = @import_module("<layout>");
 // Import simprint for debugging
 const prt = @import_module("<simprint>");
 
+// Import timestamp for cycle-count instrumentation
+const timestamp = @import_module("<time>");
+
 // ============================================================================
 // Color Config Register Access (from wse2_color_config.csl)
 // ============================================================================
@@ -100,6 +103,15 @@ var mem_B_recv = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Kt * Nt} -> B_recv[
 // Flags for synchronization
 var a_done: bool = false;
 var b_done: bool = false;
+
+// Timestamp buffers for performance (48-bit cycle count = 3 u16 words)
+var tscStartBuffer = @zeros([timestamp.tsc_size_words]u16);
+var tscEndBuffer = @zeros([timestamp.tsc_size_words]u16);
+var tscRefBuffer = @zeros([timestamp.tsc_size_words]u16);
+var time_buf_f32 = @zeros([3]f32);
+var ptr_time_memcpy: [*]f32 = &time_buf_f32;
+var time_ref_f32 = @zeros([2]f32);
+var ptr_time_ref: [*]f32 = &time_ref_f32;
 
 // ============================================================================
 // Routing Configuration
@@ -346,12 +358,6 @@ fn main() void {
     px = @as(u16, layout_mod.get_x_coord());
     py = @as(u16, layout_mod.get_y_coord());
 
-    // prt.print_string("Main entry at location ");
-    // prt.print_u16_decimal(px);
-    // prt.print_string(",");
-    // prt.print_u16_decimal(py);
-    // prt.print_string("\n");
-
     // Get color config register addresses
     a_color_addr = get_color_config_addr(a_color);
     b_color_addr = get_color_config_addr(b_color);
@@ -359,17 +365,51 @@ fn main() void {
     // Initialize step counter
     step = 0;
 
+    // Record timestamps for performance (ref and start before SUMMA)
+    timestamp.enable_tsc();
+    timestamp.get_timestamp(&tscRefBuffer);
+    timestamp.get_timestamp(&tscStartBuffer);
+ 
     // Start first SUMMA step
     summa_step();
 }
 
+fn f_memcpy_timestamps() void {
+    var lo_: u16 = 0;
+    var hi_: u16 = 0;
+
+    lo_ = tscStartBuffer[0];
+    hi_ = tscStartBuffer[1];
+    time_buf_f32[0] = @bitcast(f32, (@as(u32, hi_) << @as(u16, 16)) | @as(u32, lo_));
+
+    lo_ = tscStartBuffer[2];
+    hi_ = tscEndBuffer[0];
+    time_buf_f32[1] = @bitcast(f32, (@as(u32, hi_) << @as(u16, 16)) | @as(u32, lo_));
+
+    lo_ = tscEndBuffer[1];
+    hi_ = tscEndBuffer[2];
+    time_buf_f32[2] = @bitcast(f32, (@as(u32, hi_) << @as(u16, 16)) | @as(u32, lo_));
+}
+
+fn f_reference_timestamps() void {
+    var lo_: u16 = 0;
+    var hi_: u16 = 0;
+
+    lo_ = tscRefBuffer[0];
+    hi_ = tscRefBuffer[1];
+    time_ref_f32[0] = @bitcast(f32, (@as(u32, hi_) << @as(u16, 16)) | @as(u32, lo_));
+
+    lo_ = tscRefBuffer[2];
+    hi_ = 0;
+    time_ref_f32[1] = @bitcast(f32, (@as(u32, hi_) << @as(u16, 16)) | @as(u32, lo_));
+}
+
 task exit_task() void {
-    // prt.print_string("All SUMMA steps completed at location ");
-    // prt.print_u16_decimal(px);
-    // prt.print_string(",");
-    // prt.print_u16_decimal(py);
-    // prt.print_string("\n");
-    
+    timestamp.get_timestamp(&tscEndBuffer);
+    timestamp.disable_tsc();
+    f_reference_timestamps();
+    f_memcpy_timestamps();
+
     sys_mod.unblock_cmd_stream();
 }
 
@@ -393,5 +433,7 @@ comptime {
     @export_symbol(ptr_A, "A");
     @export_symbol(ptr_B, "B");
     @export_symbol(ptr_C, "C");
+    @export_symbol(ptr_time_memcpy, "time_memcpy");
+    @export_symbol(ptr_time_ref, "time_ref");
     @export_symbol(main);
 }
